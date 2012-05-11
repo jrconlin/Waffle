@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf8" />
+    <title>Kitchen Sync Client</title>
+</head>
+
+<body>
+    <div id="log"></div>
+<script src="core.js"></script>
+<script src="jquery-1.7.2.js"></script>
+<script language="javascript" type="text/javascript">
+
+var KitchenException = function(message){
+    this.message = message;
+}
+
+KitchenException.prototype = new Error();
+
+// Crypto Library
+var KitchenCrypto = function() {
+    this.init();
+}
+
+KitchenCrypto.prototype = {
+
+
+}
+
+// Authorize User
+// mozilla-central/services/sync/modules/service.js
+var KitchenAuth = function() {
+    var self = this;
+    var username = undefined;
+    var passwd = undefined;
+    var userAPI = undefined; // path to API url
+
+    self.changePassword = function(newPass) {
+        var url = self.userAPI + self.username + "/password";
+        // call to server (with auth header?)
+        // if response == 200 you're good
+        // otherwise timeout and puke.
+    }
+
+    self.init = function(){
+        // setup (init vals)
+    }
+
+    self.init();
+}
+
+KitchenAuth.Prototype
+// Proxy to server.
+
+</script>
+</body>
+</html>
