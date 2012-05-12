@@ -2,7 +2,7 @@
 <html>
 <head>
     <meta charset="utf8" />
-    <title>Kitchen Sync Client</title>
+    <title>Waffle Sync Client</title>
 </head>
 
 <body>
@@ -11,25 +11,214 @@
 <script src="jquery-1.7.2.js"></script>
 <script language="javascript" type="text/javascript">
 
-var KitchenException = function(message){
+var WSettings = {
+    'jpake.serverURL': 'https://setup.services.mozilla.com/',
+    'jpake.pollInterval': 1000,
+    'jpake.maxTries': 10,
+
+}
+
+var WaffleException = function(message){
     this.message = message;
 }
 
-KitchenException.prototype = new Error();
+WaffleException.prototype = new Error();
 
 // Crypto Library
-var KitchenCrypto = function() {
+var WaffleCrypto = function() {
     this.init();
 }
 
-KitchenCrypto.prototype = {
+WaffleCORS = function(method, url) {
+    var xhr = new XMLHttpRequest();
+    method = method.toUpperCase();
+    if ("withCredentials" in xhr) {
+        xhr.open(method, url, true);
+    } else {
+        if (XDomainRequest) {
+            xhr = new XDomainRequest();
+            xhr.open(method, url);
+        } else {
+            xhr = null;
+            throw new WaffleException("No CORS compliant handler found. Sorry, Can't use this browser.");
+        }
+    }
+    return xhr;
+}
 
 
+/** Auth routines
+*/
+var WaffleJPAKEClient = function(controller){
+    var self = this;
+    var clientID = undefined;
+    self.controller = controller;
+
+    const JPAKE_SIGNERID_SENDER = 'sender',
+          JPAKE_SIGNERID_RECEIVER = 'reciever',
+          JPAKE_LENGTH_SECRET = 8,
+          JPAKE_LENGTH_CLIENTID = 256,
+          JPAKE_VERIFY_VALUE = '0123456789ABCDEF';
+
+    self._serverURL = WSettings['jpake.serverURL'];
+
+    if (self._serverURL.slice(-1) != '/') {
+        self._serverURL += '/';
+    }
+
+
+    var displayPIN = function(pin) {
+
+    }
+
+    var onPairingStart = function() {
+
+    }
+
+    var onPaired = function() {
+
+    }
+
+    var onComplete = function() {
+
+    }
+
+    var onAbort = function (error) {
+
+    }
+
+    var _createSecret = function() {
+        const key = "23456789abcdefghijkmnpqrstuvwxyz";
+        var words = sjcl.random.randomWords(JPAKE_LENGTH_SECRET / 8, 0);
+        var result = [];
+        for each (var word in words) {
+            for (var i=0; i < 32; i= i + 8) {
+                result.push(key[Math.floor(((word >> i) & 0xFF) * key.length / 256)])
+            }
+        }
+        return result.join('');
+    }
+
+    var setClientID = function(cid) {
+        self.clientID = cid;
+        return self.clientID;
+    }
+
+    var getClientID = function() {
+        console.debug('in clientID getter');
+        // 
+        if (self.clientID != undefined) {
+            return self.clientID;
+        }
+        var words = sjcl.random.randomWords(JPAKE_LENGTH_CLIENTID / 8, 0);
+        var result = [];
+        self.clientID = 
+            [("0000" + Math.abs(word).toString(16)).slice(-8) for each (word in words)].join('');
+        return self.clientID;
+    }
+
+
+    // from services/common/async.js
+    var _chain = function() {
+        var funcs = Array.slice(arguments);
+        var thisObj = this;
+        return function callback() {
+            if (funcs.length) {
+                var args = Array.slice(arguments).concat(callback);
+                var f = funcs.shift();
+                f.apply(thisObj, args);
+            }
+        }
+    }
+
+    var _getChannel = function(callback) {
+        console.debug('Requesting channel from ', self._serverURL + "new_channel");
+        console.debug('  for id', getClientID());
+        /*
+        var xhr = WaffleCORS('GET', self._serverURL + "new_channel");
+        xhr.setRequestHeader('X-KeyExchange-Id', getClientID());
+        xhr.setRequestHeader('ContentType', 'application/javascript');
+        // success
+        xhr.onload = function() {
+            self._channel = xhr.responseText;
+            console.debug("Using channel ", self._channel);
+            callback(this);
+        }
+        xhr.onerror = function(e) {
+            console.error("Error fetching channel", e);
+            throw new WaffleException('Could not init JPAKE session');
+        }
+        xhr.send();
+         */
+        jQuery.ajax(self._serverURL + 'new_channel',
+                {
+                'type': 'GET',
+                'headers': {'X-KeyExchange-Id': getClientID()},
+                'success': function(data, text, jqXhr) {
+                    console.debug('Using channel ', data, text, jqXhr);
+                    self._channel = data;
+                    callback(this);},
+                'error': function(jqXhr, status, error) {
+                    console.error('Could not fetch channel', status, error);
+                    }});
+    }
+    
+
+    /** workhorse for jpake
+     */
+    var receiveNoPIN = function() {
+        this._secret = this._createSecret();
+        this._maxTries = WSettings['jpake.firstMsgMaxTries'] || 300;
+        this._chain(this._getChannel,
+                this._computeStepOne,
+                this._putStep,
+                this._getStep,
+                function (callback) {
+                    // TODO: call this.controller.onPairingStart on next thread "tick".
+                    this.controller.onPairingStart();
+                    this._maxTries = WSettings['jpake.maxTries'] || 10;
+                    callback();
+                    },
+                this._computeStepTwo,
+                this._putStep,
+                this._getStep,
+                this._computeFinal,
+                this._computeKeyVerification,
+                this._putStep,
+                function (callback) {
+                    this._maxTries = WSettings['jpake.lastMsgMaxTries'] || 300;
+                    callback();
+                    },
+                this._getStep,
+                this._decryptData,
+                this._complete)();
+    }
+
+    var pairWithPIN = function(pin, flag) {
+
+    }
+
+    var sendAndComplete = function(data) {
+    
+    }
+
+    return {
+        createSecret: _createSecret,
+        getChannel: _getChannel,
+        getClientID: getClientID,
+    }
+
+}
+
+WaffleJPAKEClient.prototype = {
+}
+
+WaffleCrypto.prototype = {
 }
 
 // Authorize User
 // mozilla-central/services/sync/modules/service.js
-var KitchenAuth = function() {
+var WaffleAuth = function() {
     var self = this;
     var username = undefined;
     var passwd = undefined;
@@ -49,9 +238,9 @@ var KitchenAuth = function() {
     self.init();
 }
 
-KitchenAuth.Prototype
-// Proxy to server.
 
+// Proxy to server.
+var w = new WaffleJPAKEClient();
 </script>
 </body>
 </html>
