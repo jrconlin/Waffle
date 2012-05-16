@@ -1920,4 +1920,4 @@ sjcl.misc.cachedPbkdf2 = function (password, obj) {
   return { key: c[salt].slice(0), salt:salt.slice(0) };
 };
 
-exports.sjcl = sjcl;
+//exports.sjcl = sjcl;

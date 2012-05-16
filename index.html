@@ -12,7 +12,8 @@
 <script language="javascript" type="text/javascript">
 
 var WSettings = {
-    'jpake.serverURL': 'https://setup.services.mozilla.com/',
+    //'jpake.serverURL': 'https://setup.services.mozilla.com/',
+    'jpake.serverURL': 'http://192.168.56.101:5001',
     'jpake.pollInterval': 1000,
     'jpake.maxTries': 10,
 
@@ -106,13 +107,13 @@ var WaffleJPAKEClient = function(controller){
 
     var getClientID = function() {
         console.debug('in clientID getter');
-        // 
+        //
         if (self.clientID != undefined) {
             return self.clientID;
         }
         var words = sjcl.random.randomWords(JPAKE_LENGTH_CLIENTID / 8, 0);
         var result = [];
-        self.clientID = 
+        self.clientID =
             [("0000" + Math.abs(word).toString(16)).slice(-8) for each (word in words)].join('');
         return self.clientID;
     }
@@ -134,7 +135,7 @@ var WaffleJPAKEClient = function(controller){
     var _getChannel = function(callback) {
         console.debug('Requesting channel from ', self._serverURL + "new_channel");
         console.debug('  for id', getClientID());
-        /*
+
         var xhr = WaffleCORS('GET', self._serverURL + "new_channel");
         xhr.setRequestHeader('X-KeyExchange-Id', getClientID());
         xhr.setRequestHeader('ContentType', 'application/javascript');
@@ -149,20 +150,12 @@ var WaffleJPAKEClient = function(controller){
             throw new WaffleException('Could not init JPAKE session');
         }
         xhr.send();
-         */
-        jQuery.ajax(self._serverURL + 'new_channel',
-                {
-                'type': 'GET',
-                'headers': {'X-KeyExchange-Id': getClientID()},
-                'success': function(data, text, jqXhr) {
-                    console.debug('Using channel ', data, text, jqXhr);
-                    self._channel = data;
-                    callback(this);},
-                'error': function(jqXhr, status, error) {
-                    console.error('Could not fetch channel', status, error);
-                    }});
     }
-    
+
+    var _computeStepOne= function (callback) {
+       
+    }
+
 
     /** workhorse for jpake
      */
@@ -199,7 +192,7 @@ var WaffleJPAKEClient = function(controller){
     }
 
     var sendAndComplete = function(data) {
-    
+
     }
 
     return {
