@@ -9,6 +9,7 @@
     <div id="log"></div>
 <script src="core.js"></script>
 <script src="jquery-1.7.2.js"></script>
+<script src="BigInt.js"></script>
 <script language="javascript" type="text/javascript">
 
 var WSettings = {
@@ -52,8 +53,42 @@ WaffleCORS = function(method, url) {
 */
 var WaffleJPAKEClient = function(controller){
     var self = this;
-    var clientID = undefined;
+    var clientID;
     self.controller = controller;
+
+    // set up keys
+    var params_moz = {'ps':
+        "0x90066455B5CFC38F9CAA4A48B4281F292C260FEEF01FD61037E56258A7795A1C" +
+        "7AD46076982CE6BB956936C6AB4DCFE05E6784586940CA544B9B2140E1EB523F" +
+        "009D20A7E7880E4E5BFA690F1B9004A27811CD9904AF70420EEFD6EA11EF7DA1" +
+        "29F58835FF56B89FAA637BC9AC2EFAAB903402229F491D8D3485261CD068699B" +
+        "6BA58A1DDBBEF6DB51E8FE34E8A78E542D7BA351C21EA8D8F1D29F5D5D159394" +
+        "87E27F4416B0CA632C59EFD1B1EB66511A5A0FBF615B766C5862D0BD8A3FE7A0" +
+        "E0DA0FB2FE1FCB19E8F9996A8EA0FCCDE538175238FC8B0EE6F29AF7F642773E" +
+        "BE8CD5402415A01451A840476B2FCEB0E388D30D4B376C37FE401C2A2C2F941D" +
+        "AD179C540C1C8CE030D460C4D983BE9AB0B20F69144C1AE13F9383EA1C08504F" +
+        "B0BF321503EFE43488310DD8DC77EC5B8349B8BFE97C2C560EA878DE87C11E3D" +
+        "597F1FEA742D73EEC7F37BE43949EF1A0D15C3F3E3FC0A8335617055AC91328E" +
+        "C22B50FC15B941D3D1624CD88BC25F3E941FDDC6200689581BFEC416B4B2CB73",
+        'q': BigInt.str2bigInt(
+        "CFA0478A54717B08CE64805B76E5B14249A77A4838469DF7F7DC987EFCCFB11D", 16),
+        'g': BigInt.str2bigInt(
+        "5E5CBA992E0A680D885EB903AEA78E4A45A469103D448EDE3B7ACCC54D521E37" +
+        "F84A4BDD5B06B0970CC2D2BBB715F7B82846F9A0C393914C792E6A923E2117AB" +
+        "805276A975AADB5261D91673EA9AAFFEECBFA6183DFCB5D3B7332AA19275AFA1" +
+        "F8EC0B60FB6F66CC23AE4870791D5982AAD1AA9485FD8F4A60126FEB2CF05DB8" +
+        "A7F0F09B3397F3937F2E90B9E5B9C9B6EFEF642BC48351C46FB171B9BFA9EF17" +
+        "A961CE96C7E7A7CC3D3D03DFAD1078BA21DA425198F07D2481622BCE45969D9C" +
+        "4D6063D72AB7A0F08B2F49A7CC6AF335E08C4720E31476B67299E231F8BD90B3" +
+        "9AC3AE3BE0C6B6CACEF8289A2E2873D58E51E029CAFBD55E6841489AB66B5B4B" +
+        "9BA6E2F784660896AFF387D92844CCB8B69475496DE19DA2E58259B090489AC8" +
+        "E62363CDF82CFD8EF2A427ABCD65750B506F56DDE3B988567A88126B914D7828" +
+        "E2B63A6D7ED0747EC59E0E0A23CE7D8A74C1D2C2A7AFB6A29799620F00E11C33" +
+        "787F7DED3B30E1A22D09F1FBDA1ABBBFBF25CAE05A13F812E34563F99410E73B", 16)
+    };
+    params_moz['p'] = BigInt.str2bigInt(params_moz.ps, 16);
+    params_moz['orderlen'] = (1 + params_moz.ps.length) / 2;
+
 
     const JPAKE_SIGNERID_SENDER = 'sender',
           JPAKE_SIGNERID_RECEIVER = 'reciever',
@@ -135,7 +170,6 @@ var WaffleJPAKEClient = function(controller){
     var _getChannel = function(callback) {
         console.debug('Requesting channel from ', self._serverURL + "new_channel");
         console.debug('  for id', getClientID());
-
         var xhr = WaffleCORS('GET', self._serverURL + "new_channel");
         xhr.setRequestHeader('X-KeyExchange-Id', getClientID());
         xhr.setRequestHeader('ContentType', 'application/javascript');
@@ -152,15 +186,90 @@ var WaffleJPAKEClient = function(controller){
         xhr.send();
     }
 
-    var _computeStepOne= function (callback) {
-       
+    /// This is seriously wonky. BigInt's random library isn't good.
+    /// sjcl's random library is better, but returns a bit array.
+    /// bigInt doesn't have a way to read in a bit array. The lingua
+    /// franca is hex, so...
+    var genBigRandom(max, min){
+        if (min == undefined) {
+            min = 0;
+        }
+        if (max == undefined) {
+            throw WaffleException('genRandom: no max specified');
+        }
+        if (min > max) {
+            throw WaffleException('genRandom: min must be < max');
+        }
+        if (min){
+            return BigInt.mod(BigInt.str2bigInt(sjcl.codec.hex.fromBits(
+                    sjcl.random.randomWords(max.length, 0)), 16),
+                            max);
+        }
+        return BigInt.addInt(BigInt.mod(BigInt.subInt(
+                BigInt.str2bigInt(sjcl.codec.hex.fromBits(
+                    sjcl.random.randomWords(pm.q.length, 0)), 16), min),
+                pm.q), min);
+    }
+
+    /// Make a Zero-Knowledge Proof
+    var _createZKP = function(g, x1, gx1, id) {
+        //      r = random(0,params_moz.q)
+        var r = genBigRandom(params_moz.q);
+        //      gr = (g ^ r) % params_moz.p)
+        var gr = BigInt.mod(BigInt.pow(g, r), params_moz.p);
+        //      h = sha256().update(g).update(gr).update(gx).update(id).digest()
+        var sha = new sjcl.hash.sha256();
+        // TODO: pass these values as converted utf8 strings.
+        var h = sha.update(BigInt.int2sg).update(gr).update(gx).update(id).finalize()
+        //      b = r - (x * h) % params_moz.q
+        //      return {'gr':gr, 'b':b, 'id':id}
+
+    }
+
+    var _one= function (callback) {
+        // use this._secret
+        console.debug("Computing step 1");
+        var id = this._signerId;
+        var pm = params_moz;
+        // round1
+        // we already converted the moz_keys into bitarrays.
+        // x1 = random(0,params_moz.q)
+        var x1 = genBigRandom(pm.q);
+        // x2 = random(1,params_moz.q)
+        var x2 = genBigRandom(pm.q, 1);
+        // gx1 = params_moz.p ^ x1
+        var gx1 = BigInt.pow(pm.p, x1);
+        // gx2 = params_moz.p ^ x2
+        var gx2 = BigInt.pow(pm.p, x2)
+        // zkp1 = createZKP(params_moz.g, x1, gx1, id)
+        // zkp2 = createZKP(params_moz.g, x2, gx2, id)
+        return {
+            'type': 'reciever' + '1',
+            'payload':
+                {'gx1': gx1,
+                'gx2': gx2,
+                'zkp_x1': {'gr': zkp1.gr,
+                            'b': zkp1.b,
+                           'id': zkp.id},
+                'zkp_x2': {'gr': zkp2.gr,
+                            'b': zkp2.b,
+                            'id':zkp2.id}
+                },
+            'version': '3'
+        }
+        // send payload to server
+
     }
 
 
     /** workhorse for jpake
+     *
+     * Using "nopin" since that's the default behavior for connecting remote
+     * clients.
      */
     var receiveNoPIN = function() {
         this._secret = this._createSecret();
+        this._signerId = JPAKE_SIGNERID_RECEIVER;
         this._maxTries = WSettings['jpake.firstMsgMaxTries'] || 300;
         this._chain(this._getChannel,
                 this._computeStepOne,
@@ -209,9 +318,96 @@ WaffleJPAKEClient.prototype = {
 WaffleCrypto.prototype = {
 }
 
+
+
+WaffleUtils = {
+    byteArrayToString: function byteArrayToString(bytes) {
+        return [String.fromCharCode(byte) for each (byte in bytes)].join('');
+    },
+
+    decodeBase32: function decodeBase32(str) {
+        const key = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+        var padChar = str.indexOf('=');
+        var chars = (padChar == -1) ? str.length : padChar;
+        var bytes = Math.floor(chars * 5 / 8);
+        var blocks = Math.ceil(chars / 8);
+
+        function processBlock(ret, cOffset, rOffset) {
+            var c, val;
+
+            function accumulate(val) {
+                ret[rOffset] |= val;
+            }
+            function advance() {
+                c = str[cOffset++];
+                if (!c || c == '' || c == '=') {
+                    throw 'done';
+                }
+                val = key.indexOf(c);
+                if (val == -1) {
+                    throw WaffleException('decodeBase32: Unknown character in base32: '+ c);
+                }
+            }
+
+            function left(octet, shift) {
+                return (octet << shift) & 0xff;
+            }
+
+            advance();
+            accumulate(left(val, 3));
+            advance();
+            accumulate(val >> 2);
+            ++rOffset;
+            accumulate(left(val, 6));
+            advance();
+            accumulate(left(val, 1));
+            advance();
+            accumulate(val >> 4);
+            ++rOffset;
+            accumulate(left(val, 4));
+            advance();
+            accumulate(val >> 1);
+            ++rOffset;
+            accumulate(left(val, 7));
+            advance();
+            accumulate(left(val, 2));
+            advance();
+            accumulate(val >> 3);
+            ++rOffset;
+            accumulate(left(val, 5));
+            advance();
+            accumulate(val);
+            ++rOffset;
+        }
+
+        var ret = new Array(bytes);
+        var i = 0,
+            cOff = 0,
+            rOff = 0;
+
+
+        for (; i < blocks; i++) {
+            try {
+                processBlock(ret, cOff, rOff);
+            }
+            catch(ex) {
+                if (ex == "done"){
+                    break;
+                }
+                console.error(ex);
+                throw ex;
+            }
+            cOff += 8;
+            rOff += 5;
+        }
+
+        return WaffleUtils.byteArrayToString(ret.slice(0, bytes));
+    }
+}
+
 // Authorize User
 // mozilla-central/services/sync/modules/service.js
-var WaffleAuth = function() {
+var WaffleAuth = function(syncKey) {
     var self = this;
     var username = undefined;
     var passwd = undefined;
@@ -224,11 +420,23 @@ var WaffleAuth = function() {
         // otherwise timeout and puke.
     }
 
-    self.init = function(){
+    // syncKey still requires username and password. Not really a great option
+    // and puts folks back into the password anti-pattern.
+    // May revisit this once browserid login is available, but it's not yet there.
+    // focusing on JPAKE for now.
+    self.init = function(syncKey){
         // setup (init vals)
+        // De-Friendly the key
+
+        if(syncKey) {
+            syncKey = syncKey.replace(/\-/g, '').replace(/8/g,'L').replace(/9/g,'O').toUpperCase();
+            syncKeyVal = WaffleUtils.decodeBase32(syncKey);
+        }
+        //HMAC_INPUT = 'Sync-AES_256_CBC-HMAC256'
+
     }
 
-    self.init();
+    self.init(syncKey);
 }
 
 
