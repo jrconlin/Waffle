@@ -14,14 +14,19 @@
 
 var WSettings = {
     //'jpake.serverURL': 'https://setup.services.mozilla.com/',
-    'jpake.serverURL': 'http://192.168.56.101:5001',
+    'jpake.serverURL': 'http://127.0.0.1:5002',
     'jpake.pollInterval': 1000,
     'jpake.maxTries': 10,
-
+    'jpake.firstMsgMaxTries': 1000,
+    'jpake.lastMsgMaxTries': 1000,
 }
 
-var WaffleException = function(message){
-    this.message = message;
+var WaffleException = function(){
+    var ma = new Array();
+    for each (arg in arguments) {
+        ma.push(JSON.stringify(arg));
+    }
+    this.message = ma.join(', ');
 }
 
 WaffleException.prototype = new Error();
@@ -48,12 +53,27 @@ WaffleCORS = function(method, url) {
     return xhr;
 }
 
+// These really ought to do bit array conversions instead of passing through hex parsers
+// sjcl stores as two words [MSW, LSW],
+// bigInt stores as bytes with mixed meta info added.
+function words2bigInt(words){
+    BigInt.str2bigInt(sjcl.codec.hex.fromBits(words), 16);
+}
+
+function bigInt2words(bi) {
+    sjcl.codec.hex.toBits(BigInt.bigInt2str(bi, 16));
+}
+
 
 /** Auth routines
 */
 var WaffleJPAKEClient = function(controller){
     var self = this;
     var clientID;
+    var timers = {};
+    //options
+    var _pollTries = 0;
+
     self.controller = controller;
 
     // set up keys
@@ -94,7 +114,8 @@ var WaffleJPAKEClient = function(controller){
           JPAKE_SIGNERID_RECEIVER = 'reciever',
           JPAKE_LENGTH_SECRET = 8,
           JPAKE_LENGTH_CLIENTID = 256,
-          JPAKE_VERIFY_VALUE = '0123456789ABCDEF';
+          JPAKE_VERIFY_VALUE = '0123456789ABCDEF',
+          JPAKE_VERSION = '3';
 
     self._serverURL = WSettings['jpake.serverURL'];
 
@@ -167,6 +188,24 @@ var WaffleJPAKEClient = function(controller){
         }
     }
 
+    var _wait = function(time, callback, name) {
+        if (name in self.timers) {
+            console.warning("Already a timer present for " + name + ". Ignoring");
+            return;
+        }
+        var timeoutId = window.setTimeout(function(self, name){
+                console.info('timer',name,'completed');
+                if (name in self.timers){
+                    clearTimeout(self.timers[name].id);
+                    var callback = self.timers[name].callback;
+                    callback();
+                } else {
+                    console.error("Timer not found for ", name);
+                }
+            });
+        self.timers[name] = {'id': timeoutId, 'callback': callback}
+    }
+
     var _getChannel = function(callback) {
         console.debug('Requesting channel from ', self._serverURL + "new_channel");
         console.debug('  for id', getClientID());
@@ -174,7 +213,7 @@ var WaffleJPAKEClient = function(controller){
         xhr.setRequestHeader('X-KeyExchange-Id', getClientID());
         xhr.setRequestHeader('ContentType', 'application/javascript');
         // success
-        xhr.onload = function() {
+        xhr.onload = function(r) {
             self._channel = xhr.responseText;
             console.debug("Using channel ", self._channel);
             callback(this);
@@ -190,7 +229,7 @@ var WaffleJPAKEClient = function(controller){
     /// sjcl's random library is better, but returns a bit array.
     /// bigInt doesn't have a way to read in a bit array. The lingua
     /// franca is hex, so...
-    var genBigRandom(max, min){
+    var genBigRandom = function(max, min){
         if (min == undefined) {
             min = 0;
         }
@@ -201,35 +240,92 @@ var WaffleJPAKEClient = function(controller){
             throw WaffleException('genRandom: min must be < max');
         }
         if (min){
-            return BigInt.mod(BigInt.str2bigInt(sjcl.codec.hex.fromBits(
-                    sjcl.random.randomWords(max.length, 0)), 16),
-                            max);
+            return BigInt.mod(words2bigInt(sjcl.random.randomWords(max.length,
+                                                                   0)), max);
         }
         return BigInt.addInt(BigInt.mod(BigInt.subInt(
-                BigInt.str2bigInt(sjcl.codec.hex.fromBits(
-                    sjcl.random.randomWords(pm.q.length, 0)), 16), min),
+                words2bigInt(sjcl.random.randomWords(pm.q.length, 0)), min),
                 pm.q), min);
     }
 
+    var _computeBHash = function(g, gr, gx, id) {
+        var sha = new sjcl.hash.sha256();
+        return words2bigInt(sha.update(bigInt2words(g)).
+            update(bigInt2words(gr)).
+            update(bigInt2words(gx)).
+            update(id).finalize().digest());
+    }
+
     /// Make a Zero-Knowledge Proof
-    var _createZKP = function(g, x1, gx1, id) {
+    var _createZKP = function(g, x, gx, id) {
         //      r = random(0,params_moz.q)
         var r = genBigRandom(params_moz.q);
         //      gr = (g ^ r) % params_moz.p)
         var gr = BigInt.mod(BigInt.pow(g, r), params_moz.p);
         //      h = sha256().update(g).update(gr).update(gx).update(id).digest()
-        var sha = new sjcl.hash.sha256();
-        // TODO: pass these values as converted utf8 strings.
-        var h = sha.update(BigInt.int2sg).update(gr).update(gx).update(id).finalize()
+        var h = self._computeBHash(g, gr, gx, id);
         //      b = r - (x * h) % params_moz.q
-        //      return {'gr':gr, 'b':b, 'id':id}
+        var b = BigInt.sub(r, BigInt.multMod(x, h, params_moz.q))
+        return {'gr':gr,
+            'b': b,
+            'id': id};
 
+    }
+
+    var _checkZKP = function(g, gx, zkp) {
+        // "Simple" checks.
+        if (BigInt.equalsInt(i, gx) || BigInt.isZero(gz)
+            || !BigInt.greater(gx, BigInt.sub(params_moz.p, 1))
+           )
+        {
+            console.error('ZKP is invalid');
+            throw new WaffleException('Invalid ZKP value')
+        }
+
+        var h = _computeBHash(g, zkp.gr, gx, zkp.id);
+
+        if (!BigInt.equals(zkp.gr,
+            BigInt.mod(BigInt.multiply(BigInt.modPow(zkp,g, zkp.b, params_moz.p),
+                BigInt.modPow(gx, h, params_moz.p)), params_moz.p)))
+        {
+            console.error('ZKP Calculation failed',
+                          {'gr': BigInt.bigInt2str(zkp.gr, 16),
+                          'b': BigInt.bigInt2str(zkp.b, 16),
+                          'g^b': BigInt.bigInt2str(BigInt.modPow(g, zkp.b, params_moz.p), 16),
+                          'g^(xh)': BigInt.bigInt2str(BigInt.modPow(gx, h, params_moz.p), 16),
+                          'gx': BigInt.bigInt2str(gx, 16),
+                          'h': BigInt.bigInt2str(h, 16)
+                          });
+            throw new WaffleException('ZKP Calculation failed')
+        }
+        console.debug('ZKP looks good');
+        return true;
+    }
+
+    var bigify = function(json) {
+        var key;
+        for (key in Object.keys(json)) {
+            switch (typeof(json[key])) {
+                case 'string':
+                    if (key != 'id'){
+                        json[key] = BigInt.str2bigInt(json[key], 16)
+                    }
+                    break;
+                case 'object':
+                    json[key] = bigify(json[key]);
+                    break;
+                default:
+                    throw new Exception("unknown data type for "+key+" "+typeof(json[key]));
+                    break;
+            }
+        }
+        return json;
     }
 
     var _one= function (callback) {
         // use this._secret
         console.debug("Computing step 1");
-        var id = this._signerId;
+        var id = this._my_signerId;
         var pm = params_moz;
         // round1
         // we already converted the moz_keys into bitarrays.
@@ -240,27 +336,210 @@ var WaffleJPAKEClient = function(controller){
         // gx1 = params_moz.p ^ x1
         var gx1 = BigInt.pow(pm.p, x1);
         // gx2 = params_moz.p ^ x2
-        var gx2 = BigInt.pow(pm.p, x2)
+        var gx2 = BigInt.pow(pm.p, x2);
         // zkp1 = createZKP(params_moz.g, x1, gx1, id)
+        var zkp1 = _createZKP(pm.g, x1, gx1, id);
         // zkp2 = createZKP(params_moz.g, x2, gx2, id)
-        return {
-            'type': 'reciever' + '1',
+        var zkp2 = _createZKP(pm.g, x2, gx2, id);
+        var step1data = {
+            'type': self._my_signerId + '1',
             'payload':
-                {'gx1': gx1,
-                'gx2': gx2,
-                'zkp_x1': {'gr': zkp1.gr,
-                            'b': zkp1.b,
-                           'id': zkp.id},
-                'zkp_x2': {'gr': zkp2.gr,
-                            'b': zkp2.b,
-                            'id':zkp2.id}
+                {'gx1': BigInt.bigInt2str(gx1, 16),
+                'gx2': BigInt.bigInt2str(gx2, 16),
+                'zkp_x1': {'gr': BigInt.bigInt2str(zkp1.gr),
+                    'b': BigInt.bigInt2str(zkp1.b, 16),
+                   'id': zkp.id},
+                'zkp_x2': {'gr': BigInt.bigInt2str(zkp2.gr),
+                    'b': BigInt.bigInt2str(zkp2.b, 16),
+                    'id':zkp2.id}
                 },
-            'version': '3'
+            'version': JPAKE_VERSION
         }
         // send payload to server
+        self._outgoing = step1data;
+        console.debug('Done Step1', JSON.stringify(step1data));
+        callback();
+    }
+
+    var _two = function (callback) {
+        console.debug("Computing round 2.");
+        if (self._incoming._type != self._their_signerid + '1') {
+            console.error("Invalid round 1 message: ", JSON.stringify(this._incoming));
+            throw new WaffleException("Invalid JPAKE Message");
+            return;
+        }
+        self._outgoing = self._incoming;
+        var step1 = bigify(self._incoming.payload)
+        if (!step1
+            || !step1.zkp_x1
+            || step1.zkp_x1.id != this._their_signerid
+            || !step1.zkp_x2
+            || step1.zkp_x2.id != this._their_signerid) {
+            console.error("Invalid payload for round 1 message", JSON.stringify(this._incoming));
+            throw new WaffleException("Invalid JPAKE Message");
+            return;
+        }
+        try {
+            var A = {};
+            var gvA = {};
+            var rA = {};
+
+            var zkp3 = {'gr': step1.zkp_1.gr,
+                        'b': step1.zkp_1.b,
+                        'id': step1.zkp_1.id};
+            var zkp4 = {'gr': step1.zkp_2.gr,
+                        'b': step1.zkp_2.b,
+                        'id': step1.zkp_2.id};
+            var gx3 = gx1;
+            var gx4 = step1.gx2;
+            // check the zkp hashes (these throw if bad)
+            _checkZKP(params_moz.g, gx3, zkp3);
+            _checkZKP(params_moz.g, gx4, zkp4);
+
+            var y1 = BigInt.multMod(BigInt.multMod(gx3, gx4, params_moz.p),
+                                    step1.gx1, params_moz.p);
+            var biSecret = BigInt.str2bigInt(scjl.codec.hex.fromBits(sjcl.codec.utf8String.toBits(self._secret)), 16);
+            var y2 = BigInt.multMod(step1.gx2, biSecret, params_moz.p);
+
+            var a = BigInt.modPow(y1, y2, params_moz.p);
+            var zkpA = _createZKP(y1, y2, a, self.signerId);
+            var aStr = BigInt.str2bigInt(a, 16);
+
+            self._outgoing['type'] = self._my_signerId + '2';
+            self._outgoing.payload['A'] = '00'.slice(0, (aStr.length % 2)) + aStr;
+            self._outgoing.payload['zkp_A'] =
+                        {'gr': BigInt.bigInt2str(zkpA.gr, 16),
+                         'b': BigInt.bigInt2str(zkpA.b, 16),
+                         'id': zkpA.id};
+        } catch(e) {
+            console.error("Couldn't generate second step ", JSON.stringify(e));
+            throw new WaffleException("Couldn't generate second step", e);
+        }
+    }
+
+
+    var hkdfExpand = function (prk, retBytes, info) {
+        const BLOCKSIZE = 256/8;
+        var N = Math.ceil(prk.length / BLOCKSIZE);
+        var T = '';
+        var Tn = '';
+        if (info == undefined) {
+            info == '';
+        }
+        for (var i =0; i <  N ;i++) {
+            Tn = scjl.codec.utf8.fromBits(sjcl.hash.sha256.hash(Tn + info + i.toString(16)));
+            T += Tn;
+        }
+        return T.slice(0,retBytes);
+    }
+
+    var _final = function (callback) {
+        if (self._incoming.type != self._their_signerId + "2") {
+            console.error("Invalid round 2 message", JSON.stringify(this._incoming));
+            throw new WaffleException("Invalid round 2 message");
+        }
+        self._outgoing = self._incoming;
+        var payload = self.bigify(self._incoming.payload);
+        if (!payload ||
+            !payload.zkp_A ||
+            payload.zkp_A.id != self._their_signerId) {
+            console.error('Invalid final payload' + JSON.stringify(payload));
+            throw new WaffleException("Invalid JPAKE message");
+        }
+        try {
+            var aes256Key = {};
+            var hmac256Key = {};
+            //here
+            var otherZkpA = _createZKP(step2.gr,
+                          step2.b,
+                          step2.id);
+            var biSecret = BigInt.str2bigInt(
+                            scjl.codec.hex.fromBits(
+                                sjcl.codec.utf8String.toBits(self._secret)), 16);
+            // final step
+            var gb = BigInt.mult(payload.gx3,
+                        BigInt.multMod(payload.gx1, payload.gx2, params_moz.p));
+            _checkZKP(gb, payload.A, otherZkpA);
+
+            var k = BigInt.modPow(BigInt.mult(A, BigInt.modPow(gx4, BigInt.mod(BigInt.mult(-1, BigInt.mult(x2, secretValue)), pm.q) , pm.p)), x2, pm.P);
+            var k_words = bigInt2words(k);
+            var prk = sjcl.hash.sha256.hash(k_words);
+            var okm = hkdfExpand(prk, 32 * 2); //HKDF string
+            var key = okm.slice(0,32);
+            var hmac = okm.slice(32,encOut.length);
+            self['keyBundle'] = {'encryptionKey': key,
+                            'hmac': hmac};
+        } catch (e) {
+            console.error("Could not process final ", e, JSON.stringify(self._incoming));
+            throw WaffleException('Invalid JPAKE Message')
+        }
+    }
+
+    var _encryptPayload = function(payload, keyBundle) {
+       
+    }
+
+    var _computeKeyVerification = function(callback) {
+        //Encrypt Payload (JPAKE_VERIFY_VALUE, keyBundle)
+        var payload = _encryptPayload(JPAKE_VERIFY_VALUE, self.keyBundle);
 
     }
 
+    var _putStep = function (callback) {
+        console.debug('Uploading message', self._outgoing.type);
+        var xhr = WaffleCORS('PUT', self._channelURL + '');
+        // set timeout = Request_Timeout
+        xhr.setRequestHeader('X-KeyExchange-Id', getClientID());
+        xhr.setRequestHeader('ContentType', 'application/javascript');
+        if (self._their_etag){
+            xhr.setRequestHeader('If-Match', self._their_etag);
+        } else {
+            xhr.setRequestHeader('If-None-Match', '*');
+        }
+        xhr.onload = function() {
+            this._my_etag = request.response.headers['etag'];
+            //surrender time?
+            console.debug('success');
+            callback(self);
+        }
+        xhr.onerror = function(e) {
+            console.error("Error putting step", e);
+            throw new WaffleException('Could not complete JPAKE exchange', e);
+        }
+    }
+
+    var _getStep = function() {
+        console.debug("Polling for step");
+        var xhr = new WaffleCORS('GET', this._channelURL);
+        if (self._my_etag) {
+            xhr.setRequestHeader('If-None-Match', self._my_etag);
+        } else {
+            xhr.setRequestHeader('If-None-Match', '*');
+        }
+        xhr.onerror = function(e) {
+            throw new WaffleException("Could not fetch step", e)
+        }
+        xhr.onload = function() {
+            if (self._finished) {
+                return;
+            }
+            debugger;
+            if (xhr.status == 304) {
+                console.debug('Channel has not been updated yet. Retry');
+                if (self._pollTries > WSettings['jpake.maxTries']) {
+                    console.error("Tried for " + self._pollTries + "tries, aborting");
+                    throw new WaffleException("Timed out.");
+                }
+                self._pollTries += 1;
+                self._wait(function() {self._getStep(callback)},
+                           WSettings['jpake.pollInterval'],
+                           "_pollTimer");
+                return;
+            }
+            this._pollTries = 0;
+            this._incoming = xhr.responseJSON;
+        }
+    }
 
     /** workhorse for jpake
      *
@@ -268,32 +547,33 @@ var WaffleJPAKEClient = function(controller){
      * clients.
      */
     var receiveNoPIN = function() {
-        this._secret = this._createSecret();
-        this._signerId = JPAKE_SIGNERID_RECEIVER;
-        this._maxTries = WSettings['jpake.firstMsgMaxTries'] || 300;
-        this._chain(this._getChannel,
-                this._computeStepOne,
-                this._putStep,
-                this._getStep,
+        self._secret = self._createSecret();
+        self._my_signerId = JPAKE_SIGNERID_RECEIVER;
+        self._their_signerId = JPAKE_SIGNERID_SENDER;
+        self._maxTries = WSettings['jpake.firstMsgMaxTries'] || 300;
+        self._chain(self._getChannel,
+                self._one,
+                self._putStep,
+                self._getStep,
                 function (callback) {
                     // TODO: call this.controller.onPairingStart on next thread "tick".
-                    this.controller.onPairingStart();
-                    this._maxTries = WSettings['jpake.maxTries'] || 10;
+                    self.controller.onPairingStart();
+                    self._maxTries = WSettings['jpake.maxTries'] || 10;
                     callback();
                     },
-                this._computeStepTwo,
-                this._putStep,
-                this._getStep,
-                this._computeFinal,
-                this._computeKeyVerification,
-                this._putStep,
+                self._two,
+                self._putStep,
+                self._getStep,
+                self._final,
+                self._computeKeyVerification,
+                self._putStep,
                 function (callback) {
-                    this._maxTries = WSettings['jpake.lastMsgMaxTries'] || 300;
+                    self._maxTries = WSettings['jpake.lastMsgMaxTries'] || 300;
                     callback();
                     },
-                this._getStep,
-                this._decryptData,
-                this._complete)();
+                self._getStep,
+                self._decryptData,
+                self._complete)();
     }
 
     var pairWithPIN = function(pin, flag) {
@@ -403,6 +683,7 @@ WaffleUtils = {
 
         return WaffleUtils.byteArrayToString(ret.slice(0, bytes));
     }
+
 }
 
 // Authorize User
