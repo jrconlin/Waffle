@@ -57,15 +57,57 @@ WaffleCORS = function(method, url) {
 // sjcl stores as two words [MSW, LSW],
 // bigInt stores as bytes with mixed meta info added.
 function words2bigInt(words){
-    BigInt.str2bigInt(sjcl.codec.hex.fromBits(words), 16);
+    return BigInt.str2bigInt(sjcl.codec.hex.fromBits(words), 16);
 }
 
 function bigInt2words(bi) {
-    sjcl.codec.hex.toBits(BigInt.bigInt2str(bi, 16));
+    return sjcl.codec.hex.toBits(BigInt.bigInt2str(bi, 16));
 }
 
 
-/** Auth routines
+var WaffleController = function() {
+    var onPairingStart = function(pin, channel) {
+        console.info('Pairing started. Waiting on other client...');
+        var keySequence = pin.slice(0,4) + " " +
+                        pin.slice(4,8) + " " +
+                        channel;
+        console.info('key:', keySequence);
+
+    }
+
+    var onPaired = function() {
+        console.info("Paired, Getting account info");
+        /*
+         account = mAccountManager.getAccountsByType("org.mozilla.firefox_sync")[0]
+         name  = account.name
+         password = mAccountManager.getPassword(account);
+         syncKey = mAccountManager.getUserData(account, 'option.synckey');
+         serverURL = mAccountManager.getUserData(account, 'option.serverUrl');
+        */
+    }
+
+    var onComplete = function(jCreds) {
+        console.debug('Completed. Please to be storing:', JSON.stringify(jCreds));
+        // Store credentials returned in jCreds
+        /* jCreds = {account:
+            password:
+            synckey:
+            serverURL:
+        }
+        */
+    }
+
+    return {
+        'onPairingStart': onPairingStart,
+        'onComplete': onComplete,
+
+    }
+}
+
+/** JPAKE routines
+ *
+ * This acts like a mobile client (currently), Meaning that it generates and
+ * displays the pin to use.
 */
 var WaffleJPAKEClient = function(controller){
     var self = this;
@@ -123,30 +165,9 @@ var WaffleJPAKEClient = function(controller){
         self._serverURL += '/';
     }
 
-
-    var displayPIN = function(pin) {
-
-    }
-
-    var onPairingStart = function() {
-
-    }
-
-    var onPaired = function() {
-
-    }
-
-    var onComplete = function() {
-
-    }
-
-    var onAbort = function (error) {
-
-    }
-
     var _createSecret = function() {
         const key = "23456789abcdefghijkmnpqrstuvwxyz";
-        var words = sjcl.random.randomWords(JPAKE_LENGTH_SECRET / 8, 0);
+        var words = sjcl.random.randomWords(JPAKE_LENGTH_SECRET / 4, 0);
         var result = [];
         for each (var word in words) {
             for (var i=0; i < 32; i= i + 8) {
@@ -243,9 +264,12 @@ var WaffleJPAKEClient = function(controller){
             return BigInt.mod(words2bigInt(sjcl.random.randomWords(max.length,
                                                                    0)), max);
         }
-        return BigInt.addInt(BigInt.mod(BigInt.subInt(
-                words2bigInt(sjcl.random.randomWords(pm.q.length, 0)), min),
-                pm.q), min);
+        var rwords = sjcl.random.randomWords(params_moz.q.length, 0);
+        console.debug(JSON.stringify(rwords));
+        var rbi = words2bigInt(rwords);
+        console.debug(JSON.stringify(rbi));
+        return BigInt.addInt(BigInt.mod(BigInt.sub(rbi,
+                                BigInt.int2bigInt(min, 1)),params_moz.q), min);
     }
 
     var _computeBHash = function(g, gr, gx, id) {
@@ -463,7 +487,8 @@ var WaffleJPAKEClient = function(controller){
 
             var k = BigInt.modPow(BigInt.mult(A, BigInt.modPow(gx4, BigInt.mod(BigInt.mult(-1, BigInt.mult(x2, secretValue)), pm.q) , pm.p)), x2, pm.P);
             var k_words = bigInt2words(k);
-            var prk = sjcl.hash.sha256.hash(k_words);
+            self["_hmac_hasher"] = new sjcl.misc.hmac(self._secret);
+            var prk = self._hmac_hasher.mac(k_words);
             var okm = hkdfExpand(prk, 32 * 2); //HKDF string
             var key = okm.slice(0,32);
             var hmac = okm.slice(32,encOut.length);
@@ -475,13 +500,97 @@ var WaffleJPAKEClient = function(controller){
         }
     }
 
-    var _encryptPayload = function(payload, keyBundle) {
-       
+    /* payload is the content to encrypt. keyBundle is the IV */
+    var _encryptPayload = function(payload, keyBundle, includeHmac) {
+        if (keyBundle == undefined) {
+            if (self.keyBundle == undefined) {
+                console.error("No keybundle found, can't encrypt");
+                throw WaffleException("No key bundle found");
+            }
+            keyBundle = self.keyBundle;
+        }
+        var result = {};
+        if (typeof(payload) != 'string') {
+            payload = JSON.stringify(payload);
+        }
+        var ptArray = sjcl.codec.utf8String.toBits(payload);
+        result['iv'] = keyBundle.encryptionKey;
+        var aes = sjcl.cipher.aes(keyBundle.encryptionKey);
+        if (ptArray.length % 4 != 0) {
+            ptArray = ptArray.concat([0, 0, 0].splice(0, 4 - ptArray.length % 4));
+        }
+        var ptArrayLen = ptArray.length;
+        var bag = [];
+        for (var i=0; i < ptArrayLen; i += 4) {
+            var items = ptArray.splice(0, 4);
+            try {
+                aes.encrypt(items).forEach(function(v){bag.push(v)});
+            } catch (e) {
+                console.error("Invalid data size (", ptArrayLen,
+                              ") Could not encrypt block. Please file a bug.");
+                throw new WaffleException("Could not encrypt block");
+            }
+        }
+        result['message'] = sjcl.codec.base64.fromBits(bag);
+        if (includeHmac) {
+            result['hmac'] = sjcl.codec.utf8string.fromBits(self._hmac_hasher.mac(result['message']));
+        }
+        return result;
+    }
+
+    var _complete = function(callback) {
+        console.debug('Exchange completed');
+        self._finished = true;
+        self.controller.onComplete(self._newData)
+        callback();
+    }
+
+    var _decryptData = function (callback) {
+        console.info("Verifying their key");
+        if (self._incoming.type != self._their_signerId + '3') {
+            this.error('Invalid round 3 data', JSON.stringify(this._incoming));
+            raise (new WaffleException("Invalid JPAKE Message"));
+        }
+
+        var step3 = this._incoming.payload;
+        // test the hmac
+        if (step3.hmac != sjcl.codec.utf8string.fromBits(self._hmac_hasher.mac(step3.message)))
+        {
+            console.error("Decrypt failed, hmac didn't match expected value");
+            throw new WaffleException('Invalid JPAKE message');
+        }
+
+        console.debug('Attempting decryption');
+        var clearText;
+        var iv = sjcl.codec.base64.toBits(step3.iv);
+        var aes = sjcl.cipher.aes(iv);
+        var ptArray = sjcl.codec.base64.toBits(step3.message);
+        if (ptArray.length % 4 != 0){
+            ptArray = ptArray.concat([0, 0, 0].splice(0, 4 - ptArray.length % 4));
+        }
+        var ptArrayLen = ptArray.length;
+        var bag = [];
+        for (var i = 0; i <= ptArrayLen; i += 4){
+            var items = ptArray.splice(0, 4);
+            try {
+                aes.decrypt(items).forEach(function(v){bag.push(v)});
+            } catch (e) {
+                console.error('Could not decrypt', JSON.stringify(e));
+                throw new WaffleException("Invalid JPAKE message");
+            }
+        }
+        self._newData = JSON.parse(sjcl.codec.utf8string.fromBits(bag).replace(/\x00*$/, ''));
+        console.info('Decrypted Data');
+        callback();
     }
 
     var _computeKeyVerification = function(callback) {
         //Encrypt Payload (JPAKE_VERIFY_VALUE, keyBundle)
-        var payload = _encryptPayload(JPAKE_VERIFY_VALUE, self.keyBundle);
+        var payload = _encryptPayload(JPAKE_VERIFY_VALUE, self.keyBundle, true);
+        var result = {'type': self.signerId + '3',
+                'version': '3',
+                'payload': payload};
+        self._outgoing = result;
 
     }
 
@@ -547,47 +656,41 @@ var WaffleJPAKEClient = function(controller){
      * clients.
      */
     var receiveNoPIN = function() {
-        self._secret = self._createSecret();
+        self._secret = _createSecret();
         self._my_signerId = JPAKE_SIGNERID_RECEIVER;
         self._their_signerId = JPAKE_SIGNERID_SENDER;
         self._maxTries = WSettings['jpake.firstMsgMaxTries'] || 300;
-        self._chain(self._getChannel,
-                self._one,
-                self._putStep,
-                self._getStep,
+        _chain(_getChannel,
+                _one,
+                _putStep,
+                _getStep,
                 function (callback) {
-                    // TODO: call this.controller.onPairingStart on next thread "tick".
-                    self.controller.onPairingStart();
+                    self.controller.onPairingStart(self._secret, self._channel);
                     self._maxTries = WSettings['jpake.maxTries'] || 10;
                     callback();
                     },
-                self._two,
-                self._putStep,
-                self._getStep,
-                self._final,
-                self._computeKeyVerification,
-                self._putStep,
+                _two,
+                _putStep,
+                _getStep,
+                _final,
+                _computeKeyVerification,
+                _putStep,
                 function (callback) {
                     self._maxTries = WSettings['jpake.lastMsgMaxTries'] || 300;
                     callback();
                     },
-                self._getStep,
-                self._decryptData,
-                self._complete)();
+                _getStep,
+                _decryptData,
+                _complete)();
     }
 
     var pairWithPIN = function(pin, flag) {
-
-    }
-
-    var sendAndComplete = function(data) {
-
+        throw (new WaffleException("Sorry, not implemented"));
     }
 
     return {
-        createSecret: _createSecret,
-        getChannel: _getChannel,
         getClientID: getClientID,
+        receiveNoPIN: receiveNoPIN
     }
 
 }
@@ -720,9 +823,8 @@ var WaffleAuth = function(syncKey) {
     self.init(syncKey);
 }
 
-
 // Proxy to server.
-var w = new WaffleJPAKEClient();
+var wj = new WaffleJPAKEClient();
 </script>
 </body>
 </html>
