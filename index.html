@@ -36,7 +36,7 @@ var WaffleCrypto = function() {
     this.init();
 }
 
-WaffleCORS = function(method, url) {
+WaffleCORS = function(method, url, clientID) {
     var xhr = new XMLHttpRequest();
     method = method.toUpperCase();
     if ("withCredentials" in xhr) {
@@ -50,6 +50,8 @@ WaffleCORS = function(method, url) {
             throw new WaffleException("No CORS compliant handler found. Sorry, Can't use this browser.");
         }
     }
+    xhr.setRequestHeader('X-KeyExchange-Id', clientID);
+    xhr.setRequestHeader('ContentType', 'application/javascript');
     return xhr;
 }
 
@@ -76,6 +78,7 @@ var WaffleController = function() {
     }
 
     var onPaired = function() {
+        debugger;
         console.info("Paired, Getting account info");
         /*
          account = mAccountManager.getAccountsByType("org.mozilla.firefox_sync")[0]
@@ -87,6 +90,7 @@ var WaffleController = function() {
     }
 
     var onComplete = function(jCreds) {
+        debugger;
         console.debug('Completed. Please to be storing:', JSON.stringify(jCreds));
         // Store credentials returned in jCreds
         /* jCreds = {account:
@@ -199,8 +203,10 @@ var WaffleJPAKEClient = function(controller){
     // from services/common/async.js
     var _chain = function() {
         var funcs = Array.slice(arguments);
-        var thisObj = this;
+        console.debug("_chain:", funcs.length, JSON.stringify(funcs))
+        var thisObj = self;
         return function callback() {
+            console.debug(' in chainer:', funcs.length, JSON.stringify(funcs), callback)
             if (funcs.length) {
                 var args = Array.slice(arguments).concat(callback);
                 var f = funcs.shift();
@@ -230,13 +236,12 @@ var WaffleJPAKEClient = function(controller){
     var _getChannel = function(callback) {
         console.debug('Requesting channel from ', self._serverURL + "new_channel");
         console.debug('  for id', getClientID());
-        var xhr = WaffleCORS('GET', self._serverURL + "new_channel");
-        xhr.setRequestHeader('X-KeyExchange-Id', getClientID());
-        xhr.setRequestHeader('ContentType', 'application/javascript');
+        var xhr = WaffleCORS('GET', self._serverURL + "new_channel", getClientID());
         // success
         xhr.onload = function(r) {
-            self._channel = xhr.responseText;
-            console.debug("Using channel ", self._channel);
+            self._channel = JSON.parse(xhr.responseText);
+            self._channelURL = self._serverURL + self._channel;
+            console.debug("Using channel ", self._channelURL);
             callback(this);
         }
         xhr.onerror = function(e) {
@@ -244,6 +249,9 @@ var WaffleJPAKEClient = function(controller){
             throw new WaffleException('Could not init JPAKE session');
         }
         xhr.send();
+        if (callback) {
+            callback();
+        }
     }
 
     /// This is seriously wonky. BigInt's random library isn't good.
@@ -277,7 +285,7 @@ var WaffleJPAKEClient = function(controller){
         return words2bigInt(sha.update(bigInt2words(g)).
             update(bigInt2words(gr)).
             update(bigInt2words(gx)).
-            update(id).finalize().digest());
+            update(id).finalize());
     }
 
     /// Make a Zero-Knowledge Proof
@@ -285,9 +293,9 @@ var WaffleJPAKEClient = function(controller){
         //      r = random(0,params_moz.q)
         var r = genBigRandom(params_moz.q);
         //      gr = (g ^ r) % params_moz.p)
-        var gr = BigInt.mod(BigInt.pow(g, r), params_moz.p);
+        var gr = BigInt.powMod(g, r, params_moz.p);
         //      h = sha256().update(g).update(gr).update(gx).update(id).digest()
-        var h = self._computeBHash(g, gr, gx, id);
+        var h = _computeBHash(g, gr, gx, id);
         //      b = r - (x * h) % params_moz.q
         var b = BigInt.sub(r, BigInt.multMod(x, h, params_moz.q))
         return {'gr':gr,
@@ -347,9 +355,9 @@ var WaffleJPAKEClient = function(controller){
     }
 
     var _one= function (callback) {
-        // use this._secret
+        // use self._secret
         console.debug("Computing step 1");
-        var id = this._my_signerId;
+        var id = self._my_signerId;
         var pm = params_moz;
         // round1
         // we already converted the moz_keys into bitarrays.
@@ -358,11 +366,12 @@ var WaffleJPAKEClient = function(controller){
         // x2 = random(1,params_moz.q)
         var x2 = genBigRandom(pm.q, 1);
         // gx1 = params_moz.p ^ x1
-        var gx1 = BigInt.pow(pm.p, x1);
+        var gx1 = BigInt.powMod(pm.g, x1, pm.p);
         // gx2 = params_moz.p ^ x2
-        var gx2 = BigInt.pow(pm.p, x2);
+        var gx2 = BigInt.powMod(pm.g, x2, pm.p);
         // zkp1 = createZKP(params_moz.g, x1, gx1, id)
         var zkp1 = _createZKP(pm.g, x1, gx1, id);
+        console.debug('zkp1', JSON.stringify(zkp1));
         // zkp2 = createZKP(params_moz.g, x2, gx2, id)
         var zkp2 = _createZKP(pm.g, x2, gx2, id);
         var step1data = {
@@ -370,10 +379,10 @@ var WaffleJPAKEClient = function(controller){
             'payload':
                 {'gx1': BigInt.bigInt2str(gx1, 16),
                 'gx2': BigInt.bigInt2str(gx2, 16),
-                'zkp_x1': {'gr': BigInt.bigInt2str(zkp1.gr),
+                'zkp_x1': {'gr': BigInt.bigInt2str(zkp1.gr, 16),
                     'b': BigInt.bigInt2str(zkp1.b, 16),
-                   'id': zkp.id},
-                'zkp_x2': {'gr': BigInt.bigInt2str(zkp2.gr),
+                   'id': zkp1.id},
+                'zkp_x2': {'gr': BigInt.bigInt2str(zkp2.gr, 16),
                     'b': BigInt.bigInt2str(zkp2.b, 16),
                     'id':zkp2.id}
                 },
@@ -388,7 +397,7 @@ var WaffleJPAKEClient = function(controller){
     var _two = function (callback) {
         console.debug("Computing round 2.");
         if (self._incoming._type != self._their_signerid + '1') {
-            console.error("Invalid round 1 message: ", JSON.stringify(this._incoming));
+            console.error("Invalid round 1 message: ", JSON.stringify(self._incoming));
             throw new WaffleException("Invalid JPAKE Message");
             return;
         }
@@ -396,10 +405,10 @@ var WaffleJPAKEClient = function(controller){
         var step1 = bigify(self._incoming.payload)
         if (!step1
             || !step1.zkp_x1
-            || step1.zkp_x1.id != this._their_signerid
+            || step1.zkp_x1.id != self._their_signerid
             || !step1.zkp_x2
-            || step1.zkp_x2.id != this._their_signerid) {
-            console.error("Invalid payload for round 1 message", JSON.stringify(this._incoming));
+            || step1.zkp_x2.id != self._their_signerid) {
+            console.error("Invalid payload for round 1 message", JSON.stringify(self._incoming));
             throw new WaffleException("Invalid JPAKE Message");
             return;
         }
@@ -439,6 +448,7 @@ var WaffleJPAKEClient = function(controller){
             console.error("Couldn't generate second step ", JSON.stringify(e));
             throw new WaffleException("Couldn't generate second step", e);
         }
+        callback();
     }
 
 
@@ -459,7 +469,7 @@ var WaffleJPAKEClient = function(controller){
 
     var _final = function (callback) {
         if (self._incoming.type != self._their_signerId + "2") {
-            console.error("Invalid round 2 message", JSON.stringify(this._incoming));
+            console.error("Invalid round 2 message", JSON.stringify(self._incoming));
             throw new WaffleException("Invalid round 2 message");
         }
         self._outgoing = self._incoming;
@@ -498,6 +508,7 @@ var WaffleJPAKEClient = function(controller){
             console.error("Could not process final ", e, JSON.stringify(self._incoming));
             throw WaffleException('Invalid JPAKE Message')
         }
+        callback();
     }
 
     /* payload is the content to encrypt. keyBundle is the IV */
@@ -548,11 +559,11 @@ var WaffleJPAKEClient = function(controller){
     var _decryptData = function (callback) {
         console.info("Verifying their key");
         if (self._incoming.type != self._their_signerId + '3') {
-            this.error('Invalid round 3 data', JSON.stringify(this._incoming));
+            console.error('Invalid round 3 data', JSON.stringify(self._incoming));
             raise (new WaffleException("Invalid JPAKE Message"));
         }
 
-        var step3 = this._incoming.payload;
+        var step3 = self._incoming.payload;
         // test the hmac
         if (step3.hmac != sjcl.codec.utf8string.fromBits(self._hmac_hasher.mac(step3.message)))
         {
@@ -591,48 +602,62 @@ var WaffleJPAKEClient = function(controller){
                 'version': '3',
                 'payload': payload};
         self._outgoing = result;
+        callback();
 
     }
 
     var _putStep = function (callback) {
         console.debug('Uploading message', self._outgoing.type);
-        var xhr = WaffleCORS('PUT', self._channelURL + '');
+        var xhr = WaffleCORS('PUT', self._channelURL + '', getClientID());
         // set timeout = Request_Timeout
-        xhr.setRequestHeader('X-KeyExchange-Id', getClientID());
-        xhr.setRequestHeader('ContentType', 'application/javascript');
         if (self._their_etag){
             xhr.setRequestHeader('If-Match', self._their_etag);
         } else {
             xhr.setRequestHeader('If-None-Match', '*');
         }
         xhr.onload = function() {
-            this._my_etag = request.response.headers['etag'];
+            self._my_etag = request.response.headers['etag'];
             //surrender time?
             console.debug('success');
-            callback(self);
+            getCallback(arguments)();
         }
         xhr.onerror = function(e) {
             console.error("Error putting step", e);
             throw new WaffleException('Could not complete JPAKE exchange', e);
         }
+        xhr.send();
     }
 
-    var _getStep = function() {
-        console.debug("Polling for step");
-        var xhr = new WaffleCORS('GET', this._channelURL);
+    var getCallback = function(args) {
+        debugger;
+        for (var i=args.length-1; i > -1; i--) {
+            candidate = args[i]
+            if (typeof(candidate) == 'function'){
+                return candidate;
+            }
+        }
+        throw new WaffleException("Broken callback chain");
+    }
+
+    var _getStep = function(callback) {
+        console.debug("Polling for step from ", self._channelURL);
+        var xhr = new WaffleCORS('GET', self._channelURL, getClientID());
         if (self._my_etag) {
             xhr.setRequestHeader('If-None-Match', self._my_etag);
         } else {
             xhr.setRequestHeader('If-None-Match', '*');
         }
         xhr.onerror = function(e) {
-            throw new WaffleException("Could not fetch step", e)
+            debugger;
+            console.error("Could not fetch step", JSON.stringify(e));
+            throw new WaffleException("Could not fetch step", e);
         }
         xhr.onload = function() {
+            debugger;
+            console.debug('got response...')
             if (self._finished) {
                 return;
             }
-            debugger;
             if (xhr.status == 304) {
                 console.debug('Channel has not been updated yet. Retry');
                 if (self._pollTries > WSettings['jpake.maxTries']) {
@@ -645,9 +670,13 @@ var WaffleJPAKEClient = function(controller){
                            "_pollTimer");
                 return;
             }
-            this._pollTries = 0;
-            this._incoming = xhr.responseJSON;
+            self._pollTries = 0;
+            debugger;
+            self._incoming = xhr.responseJSON;
+            getCallback(arguments)()
         }
+        console.debug('sending...')
+        xhr.send();
     }
 
     /** workhorse for jpake
@@ -660,6 +689,7 @@ var WaffleJPAKEClient = function(controller){
         self._my_signerId = JPAKE_SIGNERID_RECEIVER;
         self._their_signerId = JPAKE_SIGNERID_SENDER;
         self._maxTries = WSettings['jpake.firstMsgMaxTries'] || 300;
+        self.controller = new WaffleController();
         _chain(_getChannel,
                 _one,
                 _putStep,
