@@ -7,6 +7,10 @@
 
 <body>
     <div id="log"></div>
+    <div id="sync">
+        <p>Sync Key: </p>
+    <span id="syncKey"></span>
+    </div>
 <script src="core.js"></script>
 <script src="jquery-1.7.2.js"></script>
 <script src="BigInt.js"></script>
@@ -15,7 +19,7 @@
 var WSettings = {
     //'jpake.serverURL': 'https://setup.services.mozilla.com/',
     'jpake.serverURL': 'http://127.0.0.1:5002',
-    'jpake.pollInterval': 1000,
+    'jpake.pollInterval': 10000,
     'jpake.maxTries': 10,
     'jpake.firstMsgMaxTries': 1000,
     'jpake.lastMsgMaxTries': 1000,
@@ -36,10 +40,23 @@ var WaffleCrypto = function() {
     this.init();
 }
 
+function log() {
+    var logSection = document.getElementById("log");
+    var out = "";
+    for (var i = 0; i < arguments.length; i++) {
+        logSection.innerHTML += JSON.stringify(arguments[i]);
+    }
+}
+
 WaffleCORS = function(method, url, clientID) {
     var xhr = new XMLHttpRequest();
     method = method.toUpperCase();
+    if (url == undefined) {
+        debugger;
+        throw WaffleException('CORS request to nowhere!')
+    }
     if ("withCredentials" in xhr) {
+        console.debug('# Creating new',method,'xhr to',url);
         xhr.open(method, url, true);
     } else {
         if (XDomainRequest) {
@@ -68,11 +85,13 @@ function bigInt2words(bi) {
 
 
 var WaffleController = function() {
+
     var onPairingStart = function(pin, channel) {
         console.info('Pairing started. Waiting on other client...');
         var keySequence = pin.slice(0,4) + " " +
                         pin.slice(4,8) + " " +
                         channel;
+        document.getElementById('syncKey').innerHTML = keySequence;
         console.info('key:', keySequence);
 
     }
@@ -101,6 +120,7 @@ var WaffleController = function() {
         */
     }
 
+    console.debug("Building new Controller...");
     return {
         'onPairingStart': onPairingStart,
         'onComplete': onComplete,
@@ -187,8 +207,6 @@ var WaffleJPAKEClient = function(controller){
     }
 
     var getClientID = function() {
-        console.debug('in clientID getter');
-        //
         if (self.clientID != undefined) {
             return self.clientID;
         }
@@ -196,61 +214,87 @@ var WaffleJPAKEClient = function(controller){
         var result = [];
         self.clientID =
             [("0000" + Math.abs(word).toString(16)).slice(-8) for each (word in words)].join('');
+        console.debug("Setting clientID", self.clientID);
         return self.clientID;
     }
 
 
     // from services/common/async.js
-    var _chain = function() {
+    var _chainCalls = function() {
         var funcs = Array.slice(arguments);
-        console.debug("_chain:", funcs.length, JSON.stringify(funcs))
-        var thisObj = self;
         return function callback() {
-            console.debug(' in chainer:', funcs.length, JSON.stringify(funcs), callback)
+            console.debug(' in chainer:', arguments.caller,
+                          funcs.length,
+                          JSON.stringify(funcs))
             if (funcs.length) {
                 var args = Array.slice(arguments).concat(callback);
                 var f = funcs.shift();
-                f.apply(thisObj, args);
+                f.apply(self, args);
             }
         }
     }
 
+    // firebug (and a few other apps) have a bad habit of mucking with the arg
+    // stack. Since the callback is ALWAYS the last arg, this will attempt to
+    // fetch it.
+    var getCallback = function(args) {
+        for (var i=args.length-1; i > -1; i--) {
+            candidate = args[i]
+            if (typeof(candidate) == 'function'){
+                return candidate;
+            }
+        }
+        debugger;
+        console.error(args, arguments);
+        throw new WaffleException("Broken callback chain");
+    }
+
+    // kinda/sorta sleep routine.
     var _wait = function(time, callback, name) {
-        if (name in self.timers) {
-            console.warning("Already a timer present for " + name + ". Ignoring");
+        if (name in timers) {
+            console.warn("Already a timer present for " + name + ". Ignoring");
             return;
         }
+        var args = arguments;
+        var tname = name;
+        var tcallback = callback;
+        console.debug('setting timeout for ', time);
         var timeoutId = window.setTimeout(function(self, name){
-                console.info('timer',name,'completed');
-                if (name in self.timers){
-                    clearTimeout(self.timers[name].id);
-                    var callback = self.timers[name].callback;
-                    callback();
+                console.info('timer',tname,'completed');
+                if (tname in timers){
+                    console.info('clearing timer ',tname)
+                    clearTimeout(timers[tname].id);
+                    var callback = timers[tname].callback;
+                    delete timers[tname];
+                    getCallback(args)();
                 } else {
-                    console.error("Timer not found for ", name);
+                    console.error("Timer not found for ", tname);
                 }
-            });
-        self.timers[name] = {'id': timeoutId, 'callback': callback}
+            }, time);
+        timers[name] = {'id': timeoutId, 'callback': tcallback}
     }
 
     var _getChannel = function(callback) {
+        var args = arguments;
         console.debug('Requesting channel from ', self._serverURL + "new_channel");
         console.debug('  for id', getClientID());
         var xhr = WaffleCORS('GET', self._serverURL + "new_channel", getClientID());
         // success
-        xhr.onload = function(r) {
+        xhr.onload = function(evt) {
             self._channel = JSON.parse(xhr.responseText);
             self._channelURL = self._serverURL + self._channel;
             console.debug("Using channel ", self._channelURL);
-            callback(this);
+            getCallback(args)();
         }
-        xhr.onerror = function(e) {
-            console.error("Error fetching channel", e);
+        xhr.onerror = function(evt) {
+            debugger;
+            console.error("Error fetching channel", evt);
             throw new WaffleException('Could not init JPAKE session');
         }
-        xhr.send();
-        if (callback) {
-            callback();
+        try{
+            xhr.send();
+        } catch(e) {
+            xhr.onerror(e);
         }
     }
 
@@ -273,9 +317,9 @@ var WaffleJPAKEClient = function(controller){
                                                                    0)), max);
         }
         var rwords = sjcl.random.randomWords(params_moz.q.length, 0);
-        console.debug(JSON.stringify(rwords));
+        //console.debug(JSON.stringify(rwords));
         var rbi = words2bigInt(rwords);
-        console.debug(JSON.stringify(rbi));
+        //console.debug(JSON.stringify(rbi));
         return BigInt.addInt(BigInt.mod(BigInt.sub(rbi,
                                 BigInt.int2bigInt(min, 1)),params_moz.q), min);
     }
@@ -334,6 +378,7 @@ var WaffleJPAKEClient = function(controller){
         return true;
     }
 
+    // convert a JSON dict to a BigInt dict.
     var bigify = function(json) {
         var key;
         for (key in Object.keys(json)) {
@@ -371,7 +416,7 @@ var WaffleJPAKEClient = function(controller){
         var gx2 = BigInt.powMod(pm.g, x2, pm.p);
         // zkp1 = createZKP(params_moz.g, x1, gx1, id)
         var zkp1 = _createZKP(pm.g, x1, gx1, id);
-        console.debug('zkp1', JSON.stringify(zkp1));
+        //console.debug('zkp1', JSON.stringify(zkp1));
         // zkp2 = createZKP(params_moz.g, x2, gx2, id)
         var zkp2 = _createZKP(pm.g, x2, gx2, id);
         var step1data = {
@@ -391,12 +436,13 @@ var WaffleJPAKEClient = function(controller){
         // send payload to server
         self._outgoing = step1data;
         console.debug('Done Step1', JSON.stringify(step1data));
-        callback();
+        getCallback(arguments)();
     }
 
     var _two = function (callback) {
         console.debug("Computing round 2.");
-        if (self._incoming._type != self._their_signerid + '1') {
+        if (self._incoming.type != self._their_signerId + '1') {
+            debugger;
             console.error("Invalid round 1 message: ", JSON.stringify(self._incoming));
             throw new WaffleException("Invalid JPAKE Message");
             return;
@@ -448,7 +494,7 @@ var WaffleJPAKEClient = function(controller){
             console.error("Couldn't generate second step ", JSON.stringify(e));
             throw new WaffleException("Couldn't generate second step", e);
         }
-        callback();
+        getCallback(arguments)();
     }
 
 
@@ -508,7 +554,7 @@ var WaffleJPAKEClient = function(controller){
             console.error("Could not process final ", e, JSON.stringify(self._incoming));
             throw WaffleException('Invalid JPAKE Message')
         }
-        callback();
+        getCallback(arguments)();
     }
 
     /* payload is the content to encrypt. keyBundle is the IV */
@@ -553,7 +599,7 @@ var WaffleJPAKEClient = function(controller){
         console.debug('Exchange completed');
         self._finished = true;
         self.controller.onComplete(self._newData)
-        callback();
+        getCallback(arguments)();
     }
 
     var _decryptData = function (callback) {
@@ -592,7 +638,7 @@ var WaffleJPAKEClient = function(controller){
         }
         self._newData = JSON.parse(sjcl.codec.utf8string.fromBits(bag).replace(/\x00*$/, ''));
         console.info('Decrypted Data');
-        callback();
+        getCallback(arguments)();
     }
 
     var _computeKeyVerification = function(callback) {
@@ -602,81 +648,92 @@ var WaffleJPAKEClient = function(controller){
                 'version': '3',
                 'payload': payload};
         self._outgoing = result;
-        callback();
+        getCallback(arguments)();
 
     }
 
     var _putStep = function (callback) {
-        console.debug('Uploading message', self._outgoing.type);
-        var xhr = WaffleCORS('PUT', self._channelURL + '', getClientID());
+        var args = arguments;
+        console.debug('_putStep: Uploading message', self._outgoing.type);
+        var xhr = WaffleCORS('PUT', self._channelURL, getClientID());
         // set timeout = Request_Timeout
         if (self._their_etag){
             xhr.setRequestHeader('If-Match', self._their_etag);
         } else {
             xhr.setRequestHeader('If-None-Match', '*');
         }
-        xhr.onload = function() {
-            self._my_etag = request.response.headers['etag'];
+        xhr.onload = function(evt) {
+            // Remember, to view this etag, you MUST specify it in the
+            // Access-Control-Expose-Headers: tag.
+            self._my_etag = evt.target.getResponseHeader('ETag').replace(/"/g, '');
+            if (self._my_etag){
+                console.debug ("ETAG specified as", self._my_etag);
+            }
             //surrender time?
             console.debug('success');
-            getCallback(arguments)();
+            getCallback(args)();
         }
-        xhr.onerror = function(e) {
-            console.error("Error putting step", e);
-            throw new WaffleException('Could not complete JPAKE exchange', e);
+        xhr.onerror = function(evt) {
+            debugger;
+            console.error("Error putting step", evt);
+            throw new WaffleException('Could not complete JPAKE exchange', evt);
         }
-        xhr.send();
-    }
-
-    var getCallback = function(args) {
-        debugger;
-        for (var i=args.length-1; i > -1; i--) {
-            candidate = args[i]
-            if (typeof(candidate) == 'function'){
-                return candidate;
-            }
+        try {
+            xhr.send(JSON.stringify(self._outgoing));
+            console.debug("         successfully put ", JSON.stringify(self._outgoing));
+        } catch (e) {
+            debugger;
+            xhr.onerror(e);
         }
-        throw new WaffleException("Broken callback chain");
     }
 
     var _getStep = function(callback) {
-        console.debug("Polling for step from ", self._channelURL);
+        console.debug('_getStep:');
+        var cb = getCallback(arguments);
+        console.debug("Polling GET from ", self._channelURL, self._my_etag);
         var xhr = new WaffleCORS('GET', self._channelURL, getClientID());
+        debugger;
         if (self._my_etag) {
             xhr.setRequestHeader('If-None-Match', self._my_etag);
         } else {
+            console.debug('setting * as etag');
             xhr.setRequestHeader('If-None-Match', '*');
         }
-        xhr.onerror = function(e) {
+        xhr.onerror = function(evt) {
             debugger;
-            console.error("Could not fetch step", JSON.stringify(e));
-            throw new WaffleException("Could not fetch step", e);
+            console.error("Could not fetch step", JSON.stringify(evt));
+            throw new WaffleException("Could not fetch step", evt);
         }
-        xhr.onload = function() {
-            debugger;
+        xhr.onload = function(evt) {
             console.debug('got response...')
             if (self._finished) {
                 return;
             }
-            if (xhr.status == 304) {
-                console.debug('Channel has not been updated yet. Retry');
-                if (self._pollTries > WSettings['jpake.maxTries']) {
-                    console.error("Tried for " + self._pollTries + "tries, aborting");
+            if (xhr.status == 304 ) {
+                console.debug('Channel has not been updated yet. Retry', _pollTries);
+                if (_pollTries > self._maxTries) {
+                    console.error("Tried for " + _pollTries + "tries, aborting");
                     throw new WaffleException("Timed out.");
                 }
-                self._pollTries += 1;
-                self._wait(function() {self._getStep(callback)},
-                           WSettings['jpake.pollInterval'],
-                           "_pollTimer");
+                _pollTries += 1;
+                _wait(WSettings['jpake.pollInterval'],
+                        function(e) {
+                            _getStep(cb)},
+                        "_pollTimer");
                 return;
             }
-            self._pollTries = 0;
+            _pollTries = 0;
             debugger;
-            self._incoming = xhr.responseJSON;
-            getCallback(arguments)()
+            self._incoming = JSON.parse(xhr.response);
+            cb();
         }
         console.debug('sending...')
-        xhr.send();
+        try {
+            xhr.send();
+        } catch (e) {
+            debugger;
+            xhr.onerror(e);
+        }
     }
 
     /** workhorse for jpake
@@ -690,28 +747,28 @@ var WaffleJPAKEClient = function(controller){
         self._their_signerId = JPAKE_SIGNERID_SENDER;
         self._maxTries = WSettings['jpake.firstMsgMaxTries'] || 300;
         self.controller = new WaffleController();
-        _chain(_getChannel,
-                _one,
-                _putStep,
-                _getStep,
-                function (callback) {
+        _chainCalls(_getChannel,        //  1
+                _one,                   //  2
+                _putStep,               //  3
+                _getStep,               //  4
+                function (callback) {   //  5
                     self.controller.onPairingStart(self._secret, self._channel);
-                    self._maxTries = WSettings['jpake.maxTries'] || 10;
-                    callback();
+                    //self._maxTries = WSettings['jpake.maxTries'] || 10;
+                    getCallback(arguments)();
                     },
-                _two,
-                _putStep,
-                _getStep,
-                _final,
-                _computeKeyVerification,
-                _putStep,
-                function (callback) {
+                _two,                   //  6
+                _putStep,               //  7
+                _getStep,               //  8
+                _final,                 //  9
+                _computeKeyVerification,// 10
+                _putStep,               // 11
+                function (callback) {   // 12
                     self._maxTries = WSettings['jpake.lastMsgMaxTries'] || 300;
-                    callback();
+                    getCallback(arguments)();
                     },
-                _getStep,
-                _decryptData,
-                _complete)();
+                _getStep,               // 13
+                _decryptData,           // 14
+                _complete)();           // 15
     }
 
     var pairWithPIN = function(pin, flag) {
