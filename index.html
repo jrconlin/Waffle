@@ -692,7 +692,6 @@ var WaffleJPAKEClient = function(controller){
         var cb = getCallback(arguments);
         console.debug("Polling GET from ", self._channelURL, self._my_etag);
         var xhr = new WaffleCORS('GET', self._channelURL, getClientID());
-        debugger;
         if (self._my_etag) {
             xhr.setRequestHeader('If-None-Match', self._my_etag);
         } else {
@@ -749,13 +748,13 @@ var WaffleJPAKEClient = function(controller){
         self.controller = new WaffleController();
         _chainCalls(_getChannel,        //  1
                 _one,                   //  2
-                _putStep,               //  3
-                _getStep,               //  4
                 function (callback) {   //  5
                     self.controller.onPairingStart(self._secret, self._channel);
                     //self._maxTries = WSettings['jpake.maxTries'] || 10;
                     getCallback(arguments)();
                     },
+                _putStep,               //  3
+                _getStep,               //  4
                 _two,                   //  6
                 _putStep,               //  7
                 _getStep,               //  8
